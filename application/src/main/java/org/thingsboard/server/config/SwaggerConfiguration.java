@@ -31,6 +31,7 @@ import io.swagger.v3.oas.models.info.Contact;
 import io.swagger.v3.oas.models.info.Info;
 import io.swagger.v3.oas.models.info.License;
 import io.swagger.v3.oas.models.media.Content;
+import io.swagger.v3.oas.models.media.IntegerSchema;
 import io.swagger.v3.oas.models.media.MediaType;
 import io.swagger.v3.oas.models.media.Schema;
 import io.swagger.v3.oas.models.parameters.RequestBody;
@@ -59,7 +60,9 @@ import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.thingsboard.common.util.JacksonUtil;
 import org.thingsboard.server.common.data.StringUtils;
+import org.thingsboard.server.common.data.alarm.AlarmSeverity;
 import org.thingsboard.server.common.data.exception.ThingsboardErrorCode;
+import org.thingsboard.server.common.data.script.ScriptLanguage;
 import org.thingsboard.server.common.data.security.Authority;
 import org.thingsboard.server.exception.ThingsboardCredentialsExpiredResponse;
 import org.thingsboard.server.exception.ThingsboardErrorResponse;
@@ -82,7 +85,9 @@ import static org.springframework.http.MediaType.APPLICATION_JSON_VALUE;
 @ConditionalOnExpression("('${service.type:null}'=='monolith' || '${service.type:null}'=='tb-core') && '${springdoc.api-docs.enabled:true}'=='true'")
 @Profile("!test")
 public class SwaggerConfiguration {
-
+    static {
+        io.swagger.v3.core.jackson.ModelResolver.enumsAsRef = true;
+    }
     public static final String LOGIN_ENDPOINT = "/api/auth/login";
     public static final String REFRESH_TOKEN_ENDPOINT = "/api/auth/token";
 
@@ -196,13 +201,13 @@ public class SwaggerConfiguration {
         operation.summary("Login method to get user JWT token data");
         operation.description("""
                 Login method used to authenticate user and get JWT token data.
-
+                
                 Value of the response **token** field can be used as **X-Authorization** header value:
-
+                
                 `X-Authorization: Bearer $JWT_TOKEN_VALUE`.""");
         var requestBody = new RequestBody().description("Login request")
                 .content(new Content().addMediaType(APPLICATION_JSON_VALUE,
-                new MediaType().schema(new Schema<LoginRequest>().$ref("#/components/schemas/LoginRequest"))));
+                        new MediaType().schema(new Schema<LoginRequest>().$ref("#/components/schemas/LoginRequest"))));
         operation.requestBody(requestBody);
 
         operation.responses(loginResponses);
@@ -216,11 +221,11 @@ public class SwaggerConfiguration {
         var operation = new Operation();
         operation.summary("Refresh user JWT token data");
         operation.description("""
-            Method to refresh JWT token. Provide a valid refresh token to get a new JWT token.
-            
-            The response contains a new token that can be used for authorization.
-            
-            `X-Authorization: Bearer $JWT_TOKEN_VALUE`""");
+                Method to refresh JWT token. Provide a valid refresh token to get a new JWT token.
+                
+                The response contains a new token that can be used for authorization.
+                
+                `X-Authorization: Bearer $JWT_TOKEN_VALUE`""");
 
         var requestBody = new RequestBody().description("Refresh token request")
                 .content(new Content().addMediaType(APPLICATION_JSON_VALUE,
@@ -250,6 +255,10 @@ public class SwaggerConfiguration {
     @Lazy(false)
     ModelConverter mapAwareConverter() {
         return (type, context, chain) -> {
+            if (type.getType() instanceof Class && ((Class<?>) type.getType()).isEnum()) {
+                Schema<?> refSchema = new Schema<>().$ref("#/components/schemas/" + ((Class<?>) type.getType()).getSimpleName());
+                return refSchema;
+            }
             if (chain.hasNext()) {
                 Schema schema = chain.next().resolve(type, context, chain);
                 JavaType javaType = Json.mapper().constructType(type.getType());
@@ -277,12 +286,25 @@ public class SwaggerConfiguration {
         //noinspection unchecked
         jsonNodeSchema.setExamples(List.of(JacksonUtil.newObjectNode()));
         jsonNodeSchema.setDescription("A value representing the any type (object or primitive)");
+        Schema errorCodeSchema = new IntegerSchema()
+                .description("Platform error code:\n* `2` - General error (HTTP: 500 - Internal Server Error)\n\n* `10` - Authentication failed (HTTP: 401 - Unauthorized)\n\n* `11` - JWT token expired (HTTP: 401 - Unauthorized)\n\n* `15` - Credentials expired (HTTP: 401 - Unauthorized)\n\n* `20` - Permission denied (HTTP: 403 - Forbidden)\n\n* `30` - Invalid arguments (HTTP: 400 - Bad Request)\n\n* `31` - Bad request params (HTTP: 400 - Bad Request)\n\n* `32` - Item not found (HTTP: 404 - Not Found)\n\n* `33` - Too many requests (HTTP: 429 - Too Many Requests)\n\n* `34` - Too many updates (Too many updates over Websocket session)\n\n* `40` - Subscription violation (HTTP: 403 - Forbidden)")
+                .format("int32")
+                .type("integer")
+                .example(ThingsboardErrorCode.values()[0].getErrorCode())
+                ._enum(Arrays.stream(ThingsboardErrorCode.values()).map(ThingsboardErrorCode::getErrorCode).toList());
+        Schema<?> scriptLangSchema = new Schema<>()
+                .description("Script lang")
+                .type("string")
+                ._enum(Arrays.stream(ScriptLanguage.values()).map(String::valueOf).toList());
         openAPI.getComponents()
                 .addSchemas("JsonNode", jsonNodeSchema)
                 .addSchemas("LoginRequest", ModelConverters.getInstance().readAllAsResolvedSchema(new AnnotatedType().type(LoginRequest.class)).schema)
                 .addSchemas("LoginResponse", ModelConverters.getInstance().readAllAsResolvedSchema(new AnnotatedType().type(LoginResponse.class)).schema)
                 .addSchemas("ThingsboardErrorResponse", ModelConverters.getInstance().readAllAsResolvedSchema(new AnnotatedType().type(ThingsboardErrorResponse.class)).schema)
+                .addSchemas("ThingsboardErrorCode", errorCodeSchema)
+                .addSchemas("ScriptLanguage", scriptLangSchema)
                 .addSchemas("ThingsboardCredentialsExpiredResponse", ModelConverters.getInstance().readAllAsResolvedSchema(new AnnotatedType().type(ThingsboardCredentialsExpiredResponse.class)).schema);
+
     }
 
     private RouterOperationCustomizer routerOperationCustomizer(SpringDocParameterNameDiscoverer localSpringDocParameterNameDiscoverer) {
@@ -311,7 +333,6 @@ public class SwaggerConfiguration {
             return routerOperation;
         };
     }
-
     private OperationCustomizer operationCustomizer() {
         return (operation, handlerMethod) -> {
             if (StringUtils.isBlank(operation.getSummary())) {
@@ -488,7 +509,7 @@ public class SwaggerConfiguration {
     private static ApiResponse errorResponse(String description, Map<String, Example> examples, Schema<? extends ThingsboardErrorResponse> errorResponseSchema) {
         MediaType mediaType = new MediaType().schema(errorResponseSchema);
         mediaType.setExamples(examples);
-        Content content =  new Content().addMediaType(org.springframework.http.MediaType.APPLICATION_JSON_VALUE, mediaType);
+        Content content = new Content().addMediaType(org.springframework.http.MediaType.APPLICATION_JSON_VALUE, mediaType);
         return new ApiResponse().description(description).content(content);
     }
 
